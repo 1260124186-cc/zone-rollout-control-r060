@@ -127,6 +127,22 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/leases/<lease_id>/probes \
   }'
 ```
 
+节点离线后补传观察结果时，必须显式携带受控标记和原因；`observed_at` 必须早于租约领取时间，且不得早于领取前 15 分钟：
+
+```bash
+curl -sS -X PATCH http://127.0.0.1:8090/v1/leases/<lease_id>/probes \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "request_key": "probe-backfill-0001",
+    "success": true,
+    "observed_serial": 2026092501,
+    "latency_ms": 12,
+    "observed_at": "2026-09-25T11:58:00Z",
+    "backfill": true,
+    "backfill_reason": "node_offline"
+  }'
+```
+
 请求一致性判定：
 
 ```bash
@@ -187,6 +203,9 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
+- 补传必须使用 `backfill: true` 和 `backfill_reason: "node_offline"`；观察时间必须落在计划激活后、租约领取前且不早于领取前 15 分钟，并在租约到期前提交。
+- 已接受补传的身份会保留在探针和租约中；重复补传、误用标记或超出窗口都会被拒绝，普通探针保持原行为。
+- 一致性判定将所有已接受的实时和补传探针计入同一个成功比例；存在补传时返回补传统计、`backfill_observations_counted` 和稳定的 `success_ratio_basis` / `success_ratio_reason`。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
 
@@ -200,8 +219,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 4. 节点隔离、区域筛选、稳定选择和唯一租约。
 5. 租约期限、释放、过期清理和重复释放。
 6. 租约请求键与请求指纹重放。
-7. 探针请求键、载荷指纹、租约完成原子性和冲突检测。
-8. 成功率、节点覆盖、序列号一致性和延迟上限计算。
+7. 探针请求键、载荷指纹、受控补传窗口、租约完成原子性和冲突检测。
+8. 成功率、节点覆盖、序列号一致性、延迟上限和补传统一计数口径。
 9. 原子快照替换、文件锁、进程关闭和并发事务串行化。
 10. 严格 JSON 解码、分页游标和领域错误到 HTTP 状态的映射。
 

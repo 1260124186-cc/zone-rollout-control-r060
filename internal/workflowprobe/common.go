@@ -71,6 +71,16 @@ func allocate(
 	return group, err
 }
 
+func submitProbeInput(
+	harness *harness,
+	leaseID string,
+	input domain.ProbeInput,
+) (domain.Probe, error) {
+	var result domain.Probe
+	err := harness.call(http.MethodPatch, "/v1/leases/"+leaseID+"/probes", input, &result)
+	return result, err
+}
+
 func submitProbe(
 	harness *harness,
 	leaseID string,
@@ -79,13 +89,11 @@ func submitProbe(
 	serial uint32,
 	latency int,
 ) (domain.Probe, error) {
-	var result domain.Probe
-	err := harness.call(http.MethodPatch, "/v1/leases/"+leaseID+"/probes", domain.ProbeInput{
+	return submitProbeInput(harness, leaseID, domain.ProbeInput{
 		RequestKey:     requestKey,
 		Success:        success,
 		ObservedSerial: serial,
 		LatencyMS:      latency,
 		ObservedAt:     harness.clock.Now(),
-	}, &result)
-	return result, err
+	})
 }

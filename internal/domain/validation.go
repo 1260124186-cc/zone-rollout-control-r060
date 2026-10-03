@@ -45,12 +45,24 @@ type LeaseInput struct {
 }
 
 type ProbeInput struct {
-	RequestKey     string    `json:"request_key"`
-	Success        bool      `json:"success"`
-	ObservedSerial uint32    `json:"observed_serial"`
-	LatencyMS      int       `json:"latency_ms"`
-	ObservedAt     time.Time `json:"observed_at"`
+	RequestKey     string         `json:"request_key"`
+	Success        bool           `json:"success"`
+	ObservedSerial uint32         `json:"observed_serial"`
+	LatencyMS      int            `json:"latency_ms"`
+	ObservedAt     time.Time      `json:"observed_at"`
+	Backfill       bool           `json:"backfill"`
+	BackfillReason BackfillReason `json:"backfill_reason"`
 }
+
+type BackfillReason string
+
+const (
+	BackfillReasonNodeOffline BackfillReason = "node_offline"
+)
+
+const (
+	MaxBackfillObservationAge = 15 * time.Minute
+)
 
 type AssessmentInput struct {
 	RequestKey string `json:"request_key"`
@@ -219,8 +231,14 @@ func ValidateLeaseInput(input LeaseInput) error {
 	return nil
 }
 
-func ValidateProbeInput(input ProbeInput, now time.Time) error {
+func NormalizeProbeInput(input ProbeInput) ProbeInput {
 	input.RequestKey = strings.TrimSpace(input.RequestKey)
+	input.BackfillReason = BackfillReason(strings.ToLower(strings.TrimSpace(string(input.BackfillReason))))
+	return input
+}
+
+func ValidateProbeInput(input ProbeInput, now time.Time) error {
+	input = NormalizeProbeInput(input)
 	details := make(map[string]any)
 	if err := validateRequestKey(input.RequestKey); err != nil {
 		details["request_key"] = err.Error()
@@ -232,6 +250,15 @@ func ValidateProbeInput(input ProbeInput, now time.Time) error {
 		details["observed_at"] = "is required"
 	} else if input.ObservedAt.After(now.Add(5 * time.Minute)) {
 		details["observed_at"] = "cannot be more than five minutes in the future"
+	}
+	if input.Backfill {
+		if input.BackfillReason == "" {
+			details["backfill_reason"] = "is required when backfill is true"
+		} else if input.BackfillReason != BackfillReasonNodeOffline {
+			details["backfill_reason"] = "must be node_offline"
+		}
+	} else if input.BackfillReason != "" {
+		details["backfill_reason"] = "must be omitted when backfill is false"
 	}
 	if len(details) > 0 {
 		return Validation("probe input is invalid", details)

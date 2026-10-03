@@ -84,15 +84,17 @@ type ResolverNode struct {
 }
 
 type NodeLease struct {
-	ID           string     `json:"id"`
-	PlanID       string     `json:"plan_id"`
-	NodeID       string     `json:"node_id"`
-	AllocationID string     `json:"allocation_id"`
-	State        LeaseState `json:"state"`
-	ClaimedAt    time.Time  `json:"claimed_at"`
-	ExpiresAt    time.Time  `json:"expires_at"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
-	ProbeID      string     `json:"probe_id,omitempty"`
+	ID             string         `json:"id"`
+	PlanID         string         `json:"plan_id"`
+	NodeID         string         `json:"node_id"`
+	AllocationID   string         `json:"allocation_id"`
+	State          LeaseState     `json:"state"`
+	ClaimedAt      time.Time      `json:"claimed_at"`
+	ExpiresAt      time.Time      `json:"expires_at"`
+	FinishedAt     *time.Time     `json:"finished_at,omitempty"`
+	ProbeID        string         `json:"probe_id,omitempty"`
+	Backfill       bool           `json:"backfill"`
+	BackfillReason BackfillReason `json:"backfill_reason,omitempty"`
 }
 
 type LeaseGroup struct {
@@ -106,31 +108,38 @@ type LeaseGroup struct {
 }
 
 type Probe struct {
-	ID                 string    `json:"id"`
-	LeaseID            string    `json:"lease_id"`
-	PlanID             string    `json:"plan_id"`
-	NodeID             string    `json:"node_id"`
-	RequestKey         string    `json:"request_key"`
-	Success            bool      `json:"success"`
-	ObservedSerial     uint32    `json:"observed_serial"`
-	LatencyMS          int       `json:"latency_ms"`
-	ObservedAt         time.Time `json:"observed_at"`
-	StoredAt           time.Time `json:"stored_at"`
-	PayloadFingerprint string    `json:"payload_fingerprint"`
+	ID                 string         `json:"id"`
+	LeaseID            string         `json:"lease_id"`
+	PlanID             string         `json:"plan_id"`
+	NodeID             string         `json:"node_id"`
+	RequestKey         string         `json:"request_key"`
+	Success            bool           `json:"success"`
+	ObservedSerial     uint32         `json:"observed_serial"`
+	LatencyMS          int            `json:"latency_ms"`
+	ObservedAt         time.Time      `json:"observed_at"`
+	StoredAt           time.Time      `json:"stored_at"`
+	PayloadFingerprint string         `json:"payload_fingerprint"`
+	Backfill           bool           `json:"backfill"`
+	BackfillReason     BackfillReason `json:"backfill_reason,omitempty"`
 }
 
 type RolloutAssessment struct {
-	ID               string    `json:"id"`
-	PlanID           string    `json:"plan_id"`
-	RevisionID       string    `json:"revision_id"`
-	RequestKey       string    `json:"request_key"`
-	Verdict          Verdict   `json:"verdict"`
-	Reasons          []string  `json:"reasons"`
-	ProbeCount       int       `json:"probe_count"`
-	SuccessCount     int       `json:"success_count"`
-	SuccessRatio     float64   `json:"success_ratio"`
-	MaximumLatencyMS int       `json:"maximum_latency_ms"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID                   string           `json:"id"`
+	PlanID               string           `json:"plan_id"`
+	RevisionID           string           `json:"revision_id"`
+	RequestKey           string           `json:"request_key"`
+	Verdict              Verdict          `json:"verdict"`
+	Reasons              []string         `json:"reasons"`
+	ProbeCount           int              `json:"probe_count"`
+	SuccessCount         int              `json:"success_count"`
+	SuccessRatio         float64          `json:"success_ratio"`
+	MaximumLatencyMS     int              `json:"maximum_latency_ms"`
+	BackfillProbeCount   int              `json:"backfill_probe_count"`
+	BackfillSuccessCount int              `json:"backfill_success_count"`
+	BackfillReasons      []BackfillReason `json:"backfill_reasons,omitempty"`
+	SuccessRatioBasis    string           `json:"success_ratio_basis"`
+	SuccessRatioReason   string           `json:"success_ratio_reason"`
+	CreatedAt            time.Time        `json:"created_at"`
 }
 
 type AuditEvent struct {

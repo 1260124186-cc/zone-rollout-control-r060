@@ -35,6 +35,7 @@ func (s *Service) Submit(
 	input domain.ProbeInput,
 ) (domain.Probe, error) {
 	now := s.clock.Now().UTC()
+	input = domain.NormalizeProbeInput(input)
 	if err := domain.ValidateProbeInput(input, now); err != nil {
 		return domain.Probe{}, err
 	}
@@ -55,6 +56,13 @@ func (s *Service) Submit(
 					"probe_id": lease.ProbeID,
 				})
 			}
+			if existing.RequestKey != input.RequestKey {
+				return domain.NewError(domain.CodeIdempotencyConflict, "lease already has a probe and cannot accept a replay with another request key", map[string]any{
+					"lease_id":             leaseID,
+					"request_key":          input.RequestKey,
+					"existing_request_key": existing.RequestKey,
+				})
+			}
 			if existing.PayloadFingerprint != fingerprint {
 				return domain.NewError(domain.CodeIdempotencyConflict, "request key was reused with different probe content", map[string]any{
 					"lease_id":    leaseID,
@@ -63,6 +71,12 @@ func (s *Service) Submit(
 			}
 			result = existing
 			return nil
+		}
+		if lease.State == domain.LeaseExpired && input.Backfill {
+			return domain.NewError(domain.CodeLeaseExpired, "lease has expired before backfill submission", map[string]any{
+				"lease_id":   leaseID,
+				"expires_at": lease.ExpiresAt,
+			})
 		}
 		if lease.State != domain.LeaseClaimed {
 			return domain.NewError(domain.CodeLeaseNotClaimed, "lease is not claimed", map[string]any{
@@ -88,6 +102,9 @@ func (s *Service) Submit(
 				"state":   plan.State,
 			})
 		}
+		if err := domain.ValidateBackfillSchedule(input, lease, plan, now); err != nil {
+			return err
+		}
 		node, ok := state.Nodes[lease.NodeID]
 		if !ok {
 			return domain.NewError(domain.CodeStorageFailure, "lease references a missing node", map[string]any{
@@ -106,12 +123,16 @@ func (s *Service) Submit(
 			ObservedAt:         input.ObservedAt.UTC(),
 			StoredAt:           now,
 			PayloadFingerprint: fingerprint,
+			Backfill:           input.Backfill,
+			BackfillReason:     input.BackfillReason,
 		}
 		state.Probes[result.ID] = result
 		lease.State = domain.LeaseReported
 		finishedAt := now
 		lease.FinishedAt = &finishedAt
 		lease.ProbeID = result.ID
+		lease.Backfill = result.Backfill
+		lease.BackfillReason = result.BackfillReason
 		state.Leases[leaseID] = lease
 		if node.State == domain.NodeLeased {
 			node.State = domain.NodeReady
@@ -120,8 +141,10 @@ func (s *Service) Submit(
 			state.Nodes[node.ID] = node
 		}
 		store.AddAudit(state, s.ids, "probe", result.ID, "stored", now, map[string]any{
-			"lease_id": leaseID,
-			"plan_id":  lease.PlanID,
+			"lease_id":        leaseID,
+			"plan_id":         lease.PlanID,
+			"backfill":        result.Backfill,
+			"backfill_reason": result.BackfillReason,
 		})
 		return nil
 	})

@@ -56,6 +56,7 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `state`：`claimed`、`reported`、`released` 或 `expired`。
 - `claimed_at`、`expires_at`、`finished_at`。
 - `probe_id`：成功登记探针后的结果标识。
+- `backfill`、`backfill_reason`：已接受探针的补传身份及受控原因。
 
 ### LeaseGroup
 
@@ -71,6 +72,8 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `id`、`lease_id`、`plan_id`、`node_id`。
 - `request_key`、`success`、`observed_serial`、`latency_ms`。
 - `observed_at`、`stored_at`、`payload_fingerprint`。
+- `backfill`：受控补传标记；普通探针必须为 `false`。
+- `backfill_reason`：仅补传时填写，当前稳定值为 `node_offline`。
 
 ### RolloutAssessment
 
@@ -80,6 +83,8 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `verdict`：`consistent` 或 `review_required`。
 - `reasons`：稳定原因代码列表。
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
+- `backfill_probe_count`、`backfill_success_count`、`backfill_reasons`。
+- `success_ratio_basis`、`success_ratio_reason`：稳定说明成功比例的计数口径。
 - `created_at`。
 
 ## 4. 状态和规则
@@ -117,18 +122,24 @@ ready --lease--> leased --report--> ready
 - 区域名称、所有者名称和规范名称必须规范化为小写并移除末尾句点。
 - 重复加入完全相同的版本内容返回 `duplicate_revision`。
 
-### 探针幂等
+### 探针幂等与受控补传
 
-- `observed_at` 不能晚于服务时间五分钟以上。
+- `observed_at` 不能晚于服务时间五分钟以上；普通探针不额外改变原有时间校验。
 - `latency_ms` 范围为 0 到 600000。
-- 同租约同请求键同内容重放返回原探针，不重复计数。
-- 同请求键不同载荷返回 `idempotency_conflict`。
-- 探针标识符由服务生成，客户端不能覆盖。
+- 普通探针必须省略 `backfill_reason`（或为空），行为与原探针完全一致。
+- 补传必须显式提交 `backfill: true` 和 `backfill_reason: "node_offline"`；标记和原因缺失、互相矛盾或原因未知都会被拒绝。
+- 补传的观察时间必须早于租约 `claimed_at`，晚于或等于计划激活时间，且不得早于租约领取前 15 分钟。
+- 补传请求仍必须在租约 `expires_at` 之前提交；超过补传窗口或租约期限的请求不会落库。
+- 补传身份保存在探针、租约和审计中；同租约同请求键同内容重放返回原探针，不重复计数。
+- 同请求键不同载荷返回 `idempotency_conflict`；已完成租约使用新请求键再次提交（包括重复补传）也返回 `idempotency_conflict`。
+- 补传标记误用或观察不在允许窗口返回 `backfill_rejected`；探针标识符由服务生成，客户端不能覆盖。
 
 ### 一致性判定
 
 - 至少需要一个探针。
-- 成功比例按成功探针数除以全部探针数计算，结果保留 6 位小数。
+- 成功比例稳定按已接受成功探针数除以全部已接受探针数计算，结果保留 6 位小数；实时探针和符合条件的补传探针使用同一分母和分子，不单独通过或豁免。
+- 当任一已接受探针为补传时，原因列表稳定包含 `backfill_observations_counted`。该原因只说明计数口径，不单独触发 `review_required`；无补传时原因列表保持普通探针原行为。
+- `success_ratio_basis` 固定为 `all_accepted_probes`，`success_ratio_reason` 稳定说明仅实时探针或实时加补传探针的计数口径。
 - 每个参与节点都必须提交至少一个探针。
 - 所有成功探针的 `observed_serial` 必须等于计划最新版本的序列号。
 - 成功比例必须不低于 `minimum_success_ratio`。
@@ -139,6 +150,7 @@ ready --lease--> leased --report--> ready
 - `no_probes`
 - `node_not_observed`
 - `serial_mismatch`
+- `backfill_observations_counted`（非失败计数说明）
 - `success_ratio_below_minimum`
 - `latency_limit_exceeded`
 
@@ -185,14 +197,14 @@ ready --lease--> leased --report--> ready
 
 步骤：
 
-1. 入口校验租约、请求键、序列号、延迟和时间。
-2. 探针服务计算载荷指纹。
-3. 存储层写入探针、完成租约并释放节点。
+1. 入口校验租约、请求键、序列号、延迟、时间和受控补传标记。
+2. 探针服务计算载荷指纹，并按租约计划和补传时间窗口判定补传是否可接受。
+3. 存储层写入探针、完成租约并释放节点，同时在探针和租约上保留补传身份。
 4. 返回探针及关联租约状态。
 
 成功行为：首条探针落库；同键同内容安全重放。
 
-失败行为：租约过期、计划未激活、同键异载荷或持久化失败时保持原状态。
+失败行为：租约过期、计划未激活、补传标记误用、补传超出允许窗口、重复重放、同键异载荷或持久化失败时保持原状态。
 
 ### W4 一致性判定
 
@@ -204,8 +216,8 @@ ready --lease--> leased --report--> ready
 步骤：
 
 1. 入口校验计划、请求键和最新区域版本。
-2. 判定服务收集计划探针并按节点分组。
-3. 纯领域计算器生成比例、原因和最终结论。
+2. 判定服务收集计划探针、按节点分组，并保留实时/补传身份及原因。
+3. 纯领域计算器生成比例、补传统计、计数口径原因和最终结论。
 4. 存储层写入不可变判定并更新计划摘要。
 
 成功行为：返回确定性的 `consistent` 或 `review_required`。
