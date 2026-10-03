@@ -19,6 +19,9 @@ const (
 	CodeLeaseNotClaimed     ErrorCode = "lease_not_claimed"
 	CodeNoProbes            ErrorCode = "no_probes"
 	CodeConflict            ErrorCode = "conflict"
+	CodeBackfillMisused     ErrorCode = "backfill_misused"
+	CodeBackfillWindow      ErrorCode = "backfill_window_exceeded"
+	CodeBackfillReplay      ErrorCode = "backfill_replay_rejected"
 	CodeStorageFailure      ErrorCode = "storage_failure"
 	CodeInternal            ErrorCode = "internal_error"
 )

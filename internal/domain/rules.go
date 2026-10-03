@@ -55,17 +55,26 @@ func LeaseFingerprint(planID string, input LeaseInput) string {
 
 func ProbeFingerprint(leaseID string, input ProbeInput) string {
 	payload := fmt.Sprintf(
-		"%s|%s|%t|%d|%d|%s",
+		"%s|%s|%t|%d|%d|%s|%t|%s",
 		leaseID,
 		input.RequestKey,
 		input.Success,
 		input.ObservedSerial,
 		input.LatencyMS,
 		input.ObservedAt.UTC().Format(time.RFC3339Nano),
+		input.Backfill,
+		input.BackfillReason,
 	)
 	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])
 }
+
+// ReasonBackfillIncluded marks that at least one accepted probe is a
+// compensated observation. Accepted backfill probes are counted in
+// probe_count/success_count/success_ratio exactly like live probes; the
+// inclusion is always disclosed through this reason and the backfill_*
+// counters so consumers can distinguish the evidence behind the ratio.
+const ReasonBackfillIncluded = "backfill_observations_included"
 
 func BuildAssessment(
 	id string,
@@ -80,6 +89,8 @@ func BuildAssessment(
 	}
 	probeCount := len(probes)
 	successCount := 0
+	backfillCount := 0
+	backfillSuccessCount := 0
 	maximumLatency := 0
 	nodes := make(map[string]struct{})
 	for _, probe := range probes {
@@ -87,12 +98,21 @@ func BuildAssessment(
 		if probe.LatencyMS > maximumLatency {
 			maximumLatency = probe.LatencyMS
 		}
+		if probe.Backfill {
+			backfillCount++
+		}
 		if probe.Success {
 			successCount++
+			if probe.Backfill {
+				backfillSuccessCount++
+			}
 			if probe.ObservedSerial != revision.Serial {
 				reasons["serial_mismatch"] = struct{}{}
 			}
 		}
+	}
+	if backfillCount > 0 {
+		reasons[ReasonBackfillIncluded] = struct{}{}
 	}
 	if len(nodes) < plan.ExpectedNodes {
 		reasons["node_not_observed"] = struct{}{}
@@ -117,16 +137,20 @@ func BuildAssessment(
 		verdict = VerdictReviewRequired
 	}
 	return RolloutAssessment{
-		ID:               id,
-		PlanID:           plan.ID,
-		RevisionID:       revision.ID,
-		Verdict:          verdict,
-		Reasons:          reasonList,
-		ProbeCount:       probeCount,
-		SuccessCount:     successCount,
-		SuccessRatio:     successRatio,
-		MaximumLatencyMS: maximumLatency,
-		CreatedAt:        now.UTC(),
+		ID:                      id,
+		PlanID:                  plan.ID,
+		RevisionID:              revision.ID,
+		Verdict:                 verdict,
+		Reasons:                 reasonList,
+		ProbeCount:              probeCount,
+		SuccessCount:            successCount,
+		SuccessRatio:            successRatio,
+		MaximumLatencyMS:        maximumLatency,
+		BackfillProbeCount:      backfillCount,
+		BackfillSuccessCount:    backfillSuccessCount,
+		LiveProbeCount:          probeCount - backfillCount,
+		BackfillIncludedInRatio: backfillCount > 0,
+		CreatedAt:               now.UTC(),
 	}
 }
 

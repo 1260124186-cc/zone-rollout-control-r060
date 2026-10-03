@@ -2,7 +2,7 @@
 
 Zone Rollout Control 是仅依赖 Go 标准库的本机 HTTP 控制面，用于协调区域版本上线。它管理滚动计划、不可变区域版本、解析节点租约、探针结果和一致性判定。
 
-本仓库是健康项目初始化基线。当前不包含单元测试、夹具或浏览器测试；测试工作有意延后到后续测试阶段。现在通过真实 HTTP 路由的生产探针验证构建和四条核心工作流。
+本仓库是健康项目初始化基线。当前不包含单元测试、夹具或浏览器测试；测试工作有意延后到后续测试阶段。现在通过真实 HTTP 路由的生产探针验证构建和五条核心工作流。
 
 ## 环境要求
 
@@ -127,6 +127,25 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/leases/<lease_id>/probes \
   }'
 ```
 
+节点离线补传：当观察发生在租约领取之前，需显式携带 `backfill` 标记和受控
+`backfill_reason`（`node_offline`、`network_partition`、`clock_skew`）。
+观察必须早于租约领取时间、落在租约窗口内（领取前最多 15 分钟、不晚于到期），
+到期后仅可在 30 分钟补交窗口内提交，且不能重复重放：
+
+```bash
+curl -sS -X PATCH http://127.0.0.1:8090/v1/leases/<lease_id>/probes \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "request_key": "probe-backfill-001",
+    "success": true,
+    "observed_serial": 2026092501,
+    "latency_ms": 12,
+    "observed_at": "2026-09-25T11:55:00Z",
+    "backfill": true,
+    "backfill_reason": "node_offline"
+  }'
+```
+
 请求一致性判定：
 
 ```bash
@@ -187,6 +206,13 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
+- 离线补传必须成对提供 `backfill` 标记和受控原因；补传观察需早于领取时间并
+  落在租约窗口及补交窗口内，误用返回 `backfill_misused`，超窗返回
+  `backfill_window_exceeded`，重复重放返回 `backfill_replay_rejected`。
+- 被接受的补传探针与现场探针同样计入成功比例，但判定会附加
+  `backfill_observations_included` 并恒为 `review_required`，同时用
+  `backfill_probe_count`、`backfill_success_count`、`live_probe_count` 和
+  `backfill_included_in_ratio` 稳定披露比例构成。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
 
@@ -209,12 +235,13 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 
 ## 验证
 
-测试阶段有意延后，因此当前不运行单元测试或浏览器测试。以下命令分别验证四条工作流；每条命令启动真实本机 HTTP 服务、使用独立临时状态、覆盖成功与失败路径，然后关闭服务：
+测试阶段有意延后，因此当前不运行单元测试或浏览器测试。以下命令分别验证五条工作流；每条命令启动真实本机 HTTP 服务、使用独立临时状态、覆盖成功与失败路径，然后关闭服务：
 
 ```bash
 go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
+go run ./cmd/workflowprobe backfill-observation
 go run ./cmd/workflowprobe consistency-assessment
 ```
 

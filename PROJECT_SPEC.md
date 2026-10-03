@@ -56,6 +56,7 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `state`：`claimed`、`reported`、`released` 或 `expired`。
 - `claimed_at`、`expires_at`、`finished_at`。
 - `probe_id`：成功登记探针后的结果标识。
+- `backfill`、`backfill_reason`：完成租约的探针是否为离线补传，以及受控补传原因。
 
 ### LeaseGroup
 
@@ -71,6 +72,9 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `id`、`lease_id`、`plan_id`、`node_id`。
 - `request_key`、`success`、`observed_serial`、`latency_ms`。
 - `observed_at`、`stored_at`、`payload_fingerprint`。
+- `backfill`：是否为节点离线后的受控补传观察。
+- `backfill_reason`：补传受控原因，仅在 `backfill=true` 时出现，取值为
+  `node_offline`、`network_partition` 或 `clock_skew`。
 
 ### RolloutAssessment
 
@@ -80,6 +84,9 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `verdict`：`consistent` 或 `review_required`。
 - `reasons`：稳定原因代码列表。
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
+- `backfill_probe_count`、`backfill_success_count`、`live_probe_count`：
+  补传/现场探针的稳定拆分。
+- `backfill_included_in_ratio`：成功比例是否包含被接受的补传探针。
 - `created_at`。
 
 ## 4. 状态和规则
@@ -125,6 +132,28 @@ ready --lease--> leased --report--> ready
 - 同请求键不同载荷返回 `idempotency_conflict`。
 - 探针标识符由服务生成，客户端不能覆盖。
 
+### 离线补传观察
+
+当节点离线、`observed_at` 早于租约领取时间时，必须显式携带受控补传标记，
+否则仍按普通探针处理（要求租约 `claimed` 且未到期）。
+
+- 输入增加 `backfill` 布尔标记和 `backfill_reason` 受控原因；原因只允许
+  `node_offline`、`network_partition`、`clock_skew`。
+- 标记与原因必须成对出现：有标记无原因、原因不在受控集合，或未标记却携带
+  原因，均返回 `validation_failed`。
+- 补传的 `observed_at` 必须早于租约 `claimed_at`，否则返回
+  `backfill_misused`（防止把现场结果伪装成补传）。
+- 补传观察必须落在租约计划窗口内：不早于 `claimed_at - 15m`
+  （`MaxBackfillLead`），且不晚于租约 `expires_at`。
+- 租约已到期时，只允许在 `expires_at + 30m`（`MaxBackfillLateWindow`）的
+  补交窗口内补传；超出窗口或对 `released` 租约补传一律拒绝，错误为
+  `backfill_window_exceeded` 或 `lease_not_claimed`。
+- 补传是一次性提交：租约已 `reported` 后，无论请求键或载荷是否相同，再次
+  提交补传（或对补传租约再交探针）都返回 `backfill_replay_rejected`，
+  普通探针的同键同内容重放行为保持不变。
+- 补传身份（`backfill`、`backfill_reason`）随探针持久化，并回写到租约，
+  审计事件同样保留该身份。
+
 ### 一致性判定
 
 - 至少需要一个探针。
@@ -133,6 +162,11 @@ ready --lease--> leased --report--> ready
 - 所有成功探针的 `observed_serial` 必须等于计划最新版本的序列号。
 - 成功比例必须不低于 `minimum_success_ratio`。
 - 最大延迟必须不超过 `maximum_latency_ms`。
+- 被接受的补传探针与现场探针一样计入 `probe_count`、`success_count` 和
+  `success_ratio`；只要存在补传证据，结论恒为 `review_required`，并稳定附加
+  `backfill_observations_included` 原因，同时用 `backfill_probe_count`、
+  `backfill_success_count`、`live_probe_count` 和
+  `backfill_included_in_ratio` 明确比例构成。
 
 不满足条件时结论为 `review_required`，并返回以下稳定原因代码：
 
@@ -141,6 +175,7 @@ ready --lease--> leased --report--> ready
 - `serial_mismatch`
 - `success_ratio_below_minimum`
 - `latency_limit_exceeded`
+- `backfill_observations_included`
 
 ## 5. 工作流
 
@@ -185,14 +220,17 @@ ready --lease--> leased --report--> ready
 
 步骤：
 
-1. 入口校验租约、请求键、序列号、延迟和时间。
-2. 探针服务计算载荷指纹。
-3. 存储层写入探针、完成租约并释放节点。
+1. 入口校验租约、请求键、序列号、延迟和时间；补传另需校验标记、受控原因及
+   租约计划窗口与补交窗口。
+2. 探针服务计算载荷指纹（含补传标记与原因）。
+3. 存储层写入探针、完成租约（回写补传身份）并在节点仍被占用时释放节点。
 4. 返回探针及关联租约状态。
 
-成功行为：首条探针落库；同键同内容安全重放。
+成功行为：首条探针落库；同键同内容安全重放；满足租约窗口的受控补传可在
+补交窗口内落库并保留补传身份。
 
-失败行为：租约过期、计划未激活、同键异载荷或持久化失败时保持原状态。
+失败行为：租约过期、计划未激活、同键异载荷、补传标记误用、补传重复重放或
+补传超出允许窗口时保持原状态。
 
 ### W4 一致性判定
 
@@ -281,6 +319,7 @@ ready --lease--> leased --report--> ready
 1. 计划创建、版本追加、激活、完成和非法重复迁移。
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
-4. 一致性通过、审核触发、最新结果查询和幂等重放。
+4. 补传接受、身份保留、成功比例披露，以及误用、重复重放和超窗拒绝。
+5. 一致性通过、审核触发、最新结果查询和幂等重放。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

@@ -45,11 +45,13 @@ type LeaseInput struct {
 }
 
 type ProbeInput struct {
-	RequestKey     string    `json:"request_key"`
-	Success        bool      `json:"success"`
-	ObservedSerial uint32    `json:"observed_serial"`
-	LatencyMS      int       `json:"latency_ms"`
-	ObservedAt     time.Time `json:"observed_at"`
+	RequestKey     string         `json:"request_key"`
+	Success        bool           `json:"success"`
+	ObservedSerial uint32         `json:"observed_serial"`
+	LatencyMS      int            `json:"latency_ms"`
+	ObservedAt     time.Time      `json:"observed_at"`
+	Backfill       bool           `json:"backfill"`
+	BackfillReason BackfillReason `json:"backfill_reason"`
 }
 
 type AssessmentInput struct {
@@ -219,8 +221,41 @@ func ValidateLeaseInput(input LeaseInput) error {
 	return nil
 }
 
-func ValidateProbeInput(input ProbeInput, now time.Time) error {
+// MaxBackfillLead is the furthest a compensated observation may predate its
+// lease claim. It bounds how long an offline node can plausibly backdate.
+const MaxBackfillLead = 15 * time.Minute
+
+// MaxBackfillLateWindow is how long after lease expiry a compensated
+// observation can still be handed in once the node reconnects.
+const MaxBackfillLateWindow = 30 * time.Minute
+
+var allowedBackfillReasons = map[BackfillReason]struct{}{
+	BackfillReasonNodeOffline:      {},
+	BackfillReasonNetworkPartition: {},
+	BackfillReasonClockSkew:        {},
+}
+
+// NormalizeProbeInput trims free text and the controlled backfill reason. A
+// supplied reason is intentionally retained when the marker is absent so
+// validation can reject the marker/reason mismatch instead of silently
+// dropping the misuse.
+func NormalizeProbeInput(input ProbeInput) ProbeInput {
 	input.RequestKey = strings.TrimSpace(input.RequestKey)
+	if input.Backfill {
+		input.BackfillReason = BackfillReason(strings.TrimSpace(strings.ToLower(string(input.BackfillReason))))
+	}
+	return input
+}
+
+// IsAllowedBackfillReason reports whether reason is part of the controlled
+// backfill vocabulary.
+func IsAllowedBackfillReason(reason BackfillReason) bool {
+	_, ok := allowedBackfillReasons[reason]
+	return ok
+}
+
+func ValidateProbeInput(input ProbeInput, now time.Time) error {
+	input = NormalizeProbeInput(input)
 	details := make(map[string]any)
 	if err := validateRequestKey(input.RequestKey); err != nil {
 		details["request_key"] = err.Error()
@@ -232,6 +267,15 @@ func ValidateProbeInput(input ProbeInput, now time.Time) error {
 		details["observed_at"] = "is required"
 	} else if input.ObservedAt.After(now.Add(5 * time.Minute)) {
 		details["observed_at"] = "cannot be more than five minutes in the future"
+	}
+	if input.Backfill {
+		if input.BackfillReason == "" {
+			details["backfill_reason"] = "is required when backfill is marked"
+		} else if !IsAllowedBackfillReason(input.BackfillReason) {
+			details["backfill_reason"] = "must be one of node_offline, network_partition, clock_skew"
+		}
+	} else if input.BackfillReason != "" {
+		details["backfill_reason"] = "is only allowed together with the backfill marker"
 	}
 	if len(details) > 0 {
 		return Validation("probe input is invalid", details)
